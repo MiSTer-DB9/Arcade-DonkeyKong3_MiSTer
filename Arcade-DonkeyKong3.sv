@@ -176,8 +176,12 @@ module emu
 	// 1 - D-/TX
 	// 2..6 - USR2..USR6
 	// Set USER_OUT to 1 to read from USER_IN.
-	input   [6:0] USER_IN,
-	output  [6:0] USER_OUT,
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support
+	output        USER_OSD,
+	output  [1:0] USER_MODE,
+	input   [7:0] USER_IN,
+	output  [7:0] USER_OUT,
+	// [MiSTer-DB9 END]
 
 	input         OSD_STATUS
 );
@@ -196,7 +200,6 @@ assign HDMI_BOB_DEINT = 0;
 
 assign AUDIO_MIX = 0;
 
-assign USER_OUT  = '1;
 assign LED_USER  = ioctl_download;
 assign LED_DISK  = 0;
 assign LED_POWER = 0;
@@ -222,6 +225,11 @@ localparam CONF_STR = {
    "DIP;",
    "-;",
 
+   // [MiSTer-DB9 BEGIN] - DB9/SNAC8 support
+   "O[127:126],UserIO Joystick,Off,DB9MD,DB15;",
+   "O[125],UserIO Players, 1 Player,2 Players;",
+   "-;",
+   // [MiSTer-DB9 END]
    "R0,Reset;",
    "J1,Jump,Start 1P,Start 2P,Coin,Test;",
    "jn,A,Start,Select,R,L;",
@@ -245,7 +253,9 @@ pll pll
 
 ///////////////////////////////////////////////////
 
-wire [31:0] status;
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: widened to access bits 125-127
+wire [127:0] status;
+// [MiSTer-DB9 END]
 wire  [1:0] buttons;
 wire        forced_scandoubler;
 wire        direct_video;
@@ -258,7 +268,9 @@ wire  [7:0] ioctl_dout;
 wire  [7:0] ioctl_index;
 
 
-wire [15:0] joy_0, joy_1;
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: renamed for DB9 mux
+wire [15:0] joy_0_USB, joy_1_USB;
+// [MiSTer-DB9 END]
 wire [21:0] gamma_bus;
 
 hps_io #(.CONF_STR(CONF_STR)) hps_io
@@ -281,10 +293,59 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
    .ioctl_dout(ioctl_dout),
    .ioctl_index(ioctl_index),
 
-   .joystick_0(joy_0),
-   .joystick_1(joy_1)
+   // [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: renamed for DB9 mux
+   .joystick_0(joy_0_USB),
+   .joystick_1(joy_1_USB),
+   // [MiSTer-DB9 END]
+   // [MiSTer-DB9 BEGIN] - DB9/SNAC8 support
+   .joy_raw(OSD_STATUS ? ({USER_MODE, joydb_1[11:0] | joydb_2[11:0]}) : 14'b0)
+   // [MiSTer-DB9 END]
 );
 
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support
+wire         CLK_JOY = CLK_50M;
+wire   [2:0] JOY_FLAG  = {status[126],status[127],status[125]};
+wire         JOY_CLK, JOY_LOAD, JOY_SPLIT, JOY_MDSEL;
+wire   [5:0] JOY_MDIN  = JOY_FLAG[2] ? {USER_IN[6],USER_IN[3],USER_IN[5],USER_IN[7],USER_IN[1],USER_IN[2]} : '1;
+wire         JOY_DATA  = JOY_FLAG[1] ? USER_IN[5] : '1;
+assign       USER_MODE = JOY_FLAG[2:1] ;
+assign       USER_OSD  = joydb_1[10] & joydb_1[6];
+
+assign USER_OUT = JOY_FLAG[2] ? {3'b111,JOY_SPLIT,3'b111,JOY_MDSEL}
+               : JOY_FLAG[1] ? {6'b111111,JOY_CLK,JOY_LOAD}
+               : '1;
+
+wire [15:0] joydb_1 = JOY_FLAG[2] ? JOYDB9MD_1 : JOY_FLAG[1] ? JOYDB15_1 : '0;
+wire [15:0] joydb_2 = JOY_FLAG[2] ? JOYDB9MD_2 : JOY_FLAG[1] ? JOYDB15_2 : '0;
+wire        joydb_1ena = |JOY_FLAG[2:1]              ;
+wire        joydb_2ena = |JOY_FLAG[2:1] & JOY_FLAG[0];
+
+reg [15:0] JOYDB9MD_1,JOYDB9MD_2;
+joy_db9md joy_db9md
+(
+  .clk       ( CLK_JOY    ),
+  .joy_split ( JOY_SPLIT  ),
+  .joy_mdsel ( JOY_MDSEL  ),
+  .joy_in    ( JOY_MDIN   ),
+  .joystick1 ( JOYDB9MD_1 ),
+  .joystick2 ( JOYDB9MD_2 )
+);
+
+reg [15:0] JOYDB15_1,JOYDB15_2;
+joy_db15 joy_db15
+(
+  .clk       ( CLK_JOY   ),
+  .JOY_CLK   ( JOY_CLK   ),
+  .JOY_DATA  ( JOY_DATA  ),
+  .JOY_LOAD  ( JOY_LOAD  ),
+  .joystick1 ( JOYDB15_1 ),
+  .joystick2 ( JOYDB15_2 )
+);
+
+// CO S2 S1 F1 U D L R 
+wire [15:0] joy_0 = joydb_1ena ? (OSD_STATUS ? 16'b0 : {joydb_1[11]|(joydb_1[10]&joydb_1[5]),joydb_1[9],joydb_1[10],joydb_1[4:0]}) : joy_0_USB;
+wire [15:0] joy_1 = joydb_2ena ? (OSD_STATUS ? 16'b0 : {joydb_2[11]|(joydb_2[10]&joydb_2[5]),joydb_2[10],joydb_2[9],joydb_2[4:0]}) : joydb_1ena ? joy_0_USB : joy_1_USB;
+// [MiSTer-DB9 END]
 
 wire m_up,m_down,m_left,m_right;
 joy8way joy1
